@@ -117,11 +117,11 @@ int _printf(const char *fmt, va_list ap, int uart) {
                  if(*fmt=='s') _print(va_arg(ap,char *), uart);
             else if(*fmt=='x') _print_hex(va_arg(ap,int), uart);
             else if(*fmt=='d') _print_dec(va_arg(ap,int), uart);
-            else if(*fmt=='c') _putchar(va_arg(ap,int), uart);	   
+            else if(*fmt=='c') _putchar(va_arg(ap,int), uart);
             else if(*fmt=='b') _print_hex_digits(va_arg(ap,int), 2, uart);	      // byte
             else if(*fmt=='w') _print_hex_digits(va_arg(ap,int), 4, uart);	      // 16-bit word
             else _putchar(*fmt, uart);
-        } else 
+        } else
             _putchar(*fmt, uart);
     }
     return 0;
@@ -156,7 +156,7 @@ int uart_putchar(int c) {
 
 int uart_print(const char *s) {
 	while (*s)
-		_putchar(*(s++), 1);   
+		_putchar(*(s++), 1);
    return 0;
 }
 
@@ -165,7 +165,7 @@ int uart_printf(const char *fmt,...) {
    va_start(ap, fmt);
    _printf(fmt, ap, 1);
    va_end(ap);
-   return 0;   
+   return 0;
 }
 
 // int delay_count;
@@ -239,7 +239,7 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
 
    // DEBUG("joy_choice: return\n");
 
-   return 0;      
+   return 0;
 }
 
 void core_ctrl(uint32_t ctrl) {
@@ -249,11 +249,11 @@ extern void core_data(uint32_t data) {
    reg_romload_data = data;
 }
 
-/* 
+/*
  * Needed to prevent the compiler from recognizing memcpy in the
  * body of memcpy and replacing it with a call to memcpy
- * (infinite recursion) 
- */ 
+ * (infinite recursion)
+ */
 // #pragma GCC optimize ("no-tree-loop-distribute-patterns")
 
 void* memcpy(void * dst, void const * src, size_t len) {
@@ -271,18 +271,18 @@ void* memcpy(void * dst, void const * src, size_t len) {
 
    uint8_t* pcDst = (uint8_t *) plDst;
    uint8_t const* pcSrc = (uint8_t const *) plSrc;
-   
+
    while (len--) {
       *pcDst++ = *pcSrc++;
    }
-   
+
    return dst;
 }
 
 /*
  * Super-slow memset function.
  * TODO: write word by word.
- */ 
+ */
 void* memset(void* s, int c, size_t n) {
    uint8_t* p = (uint8_t*)s;
    for(size_t i=0; i<n; ++i) {
@@ -326,16 +326,16 @@ char *strstr(const char *haystack, const char *substring) {
    char *string = (char *)haystack;
    char *a, *b;
    b = (char *)substring;
-   if (*b == 0) 
+   if (*b == 0)
 	   return string;
    for (; *string != 0; string += 1) {
 	   if (*string != *b)
 	      continue;
 	   a = string;
 	   while (1) {
-         if (*b == 0) 
+         if (*b == 0)
             return string;
-         if (*a++ != *b++) 
+         if (*a++ != *b++)
             break;
       }
       b = (char *)substring;
@@ -346,16 +346,16 @@ char *strstr(const char *haystack, const char *substring) {
 char *strcasestr(char *string, char *substring) {
    char *a, *b;
    b = substring;
-   if (*b == 0) 
+   if (*b == 0)
 	   return string;
    for (; *string != 0; string += 1) {
 	   if (tolower(*string) != tolower(*b))
 	      continue;
 	   a = string;
 	   while (1) {
-         if (*b == 0) 
+         if (*b == 0)
             return string;
-         if (tolower(*a++) != tolower(*b++)) 
+         if (tolower(*a++) != tolower(*b++))
             break;
       }
       b = substring;
@@ -451,19 +451,19 @@ char *trimwhitespace(char *str) {
 
 int atoi(const char *str) {
    int sign = 1, base = 0, i = 0;
- 
+
    // if whitespaces then ignore.
    while (str[i] == ' ') {
       i++;
    }
- 
+
    // sign of number
    if (str[i] == '-' || str[i] == '+') {
       if (str[i] == '-')
          sign = -1;
       i++;
    }
- 
+
    // checking for valid input
    while (str[i] >= '0' && str[i] <= '9') {
       // handling overflow test case
