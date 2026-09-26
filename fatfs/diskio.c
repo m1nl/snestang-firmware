@@ -78,7 +78,7 @@ DRESULT disk_read (
 	case DEV_SD :
 		if (!sd_initialized)
 			return RES_NOTRDY;
-		if (sd_readsector(sector, buff, count))
+		if (sd_readsector_multi(sector, buff, count))
 			return RES_OK;		// return 1 for success
 		else
 			return RES_ERROR;
@@ -122,19 +122,45 @@ DRESULT disk_write (
 /*-----------------------------------------------------------------------*/
 
 DRESULT disk_ioctl (
-	BYTE pdrv,		/* Physical drive nmuber (0..) */
-	BYTE cmd,		/* Control code */
-	void *buff		/* Buffer to send/receive control data */
+    BYTE pdrv,
+    BYTE cmd,
+    void *buff
 )
 {
-	switch (pdrv) {
-	case DEV_SD :
-		if (cmd == GET_SECTOR_SIZE)
-			return 512;
-		else if (cmd == GET_BLOCK_SIZE)
-			return 1;
-		return 0;
-	}
-	return RES_PARERR;
-}
+    if (pdrv != DEV_SD)
+        return RES_PARERR;
 
+    if (!sd_initialized)
+        return RES_NOTRDY;
+
+    switch (cmd) {
+    case CTRL_SYNC:
+        /*
+         * If sd_writesector() only returns after the card
+         * has completed the write, nothing extra is needed here.
+         */
+        return RES_OK;
+
+    case GET_SECTOR_SIZE:
+        *(WORD *)buff = 512;
+        return RES_OK;
+
+    case GET_BLOCK_SIZE:
+        /*
+         * Erase block size in units of sectors.
+         * FatFs allows 1 if the actual value is unknown.
+         */
+        *(DWORD *)buff = 1;
+        return RES_OK;
+
+    case GET_SECTOR_COUNT:
+        /*
+         * You need the card capacity for this one.
+         * Don't invent a value.
+         */
+        return RES_PARERR;
+
+    default:
+        return RES_PARERR;
+    }
+}
