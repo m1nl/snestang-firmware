@@ -4,14 +4,15 @@
 #
 TARGET_ELF = firmware.elf
 TARGET_BIN = firmware.bin
-#RISCV = /opt/xpack-riscv-none-elf-gcc-13.2.0-2/bin/riscv-none-elf
-RISCV = /usr/local/xpack-riscv-none-embed-gcc-10.1.0-1.1/bin/riscv-none-embed
+
+RISCV = toolchain/xpack-riscv-none-elf-gcc-15.2.0-1/bin/riscv-none-elf
 CC = $(RISCV)-gcc
+
 OBJCOPY = $(RISCV)-objcopy
 OBJDUMP = $(RISCV)-objdump
-CFLAGS  = -Wall -O2 -g -mabi=ilp32 -march=rv32i -ffreestanding
-LFLAGS = -mabi=ilp32 -march=rv32i -Wl,--build-id=none,-Bstatic,-T,baremetal.ld -nostdlib
-LIBS = -lgcc
+CFLAGS  = -Wall -Os -mabi=ilp32 -march=rv32i -ffreestanding
+LFLAGS  = -mabi=ilp32 -march=rv32i -Wl,--build-id=none,-Bstatic,-T,baremetal.ld,--strip-debug -nostdlib
+LIBS    = -lgcc
 
 SRCS := start.S firmware.c picorv32.c spi_sd.c spiflash.c \
 	fatfs/diskio.c fatfs/ff.c fatfs/ffunicode.c
