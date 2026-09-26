@@ -788,31 +788,26 @@ int loadsnes(int rom) {
         goto loadsnes_snes_end;
     }
     do {
-        if ((r = f_read(&f, load_buf, 1024, &br)) != FR_OK)
-            break;
-        for (int i = 0; i < br; i += 4) {
-            uint32_t *w = (uint32_t *)(load_buf + i);
-            core_data(*w);				// send actual ROM data
-        }
+        if ((r = f_read(&f, reg_romload_stream, ROM_READ_CHUNK, &br)) != FR_OK)
+             break;
         total += br;
-        if ((total & 0xffff) == 0) {	// display progress every 64KB
-            status("");
-            printf("%d/%dK", total >> 10, size >> 10);
-            if ((map_ctrl & 3) == 0)
-                print(" Lo");
-            else if ((map_ctrl & 3) == 1)
-                print(" Hi");
-            else if ((map_ctrl & 3) == 2)
-                print(" ExHi");
-            printf(" ROM=%d RAM=%d", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
-        }
-    } while (br == 1024);
+        status("");
+        printf("%d/%dK", total >> 10, size >> 10);
+        if ((map_ctrl & 3) == 0)
+            print(" Lo");
+        else if ((map_ctrl & 3) == 1)
+            print(" Hi");
+        else if ((map_ctrl & 3) == 2)
+            print(" ExHi");
+        printf(" ROM=%d RAM=%d", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
+    } while (br == ROM_READ_CHUNK);
 
     // load BSRAM backup
     core_backup_size = ram_size == 0 ? 0 : ((1 << ram_size) << 10);
-    if (core_backup_size > 0)
+    if (core_backup_size > 0) {
         memset((uint8_t *)0x700000, 0, core_backup_size);		// clear BSRAM
-    backup_load(core_backup_name, core_backup_size);
+        backup_load(core_backup_name, core_backup_size);
+    }
 
     status("Success");
     core_running = true;
@@ -1344,6 +1339,7 @@ uint16_t gen_crc16(const volatile uint8_t *data, int size) {
 }
 
 int main() {
+   
     CORE_ID = reg_core_id;
     overlay(1);
 

@@ -1,6 +1,7 @@
 #ifndef FIRMWARE_H
 #define FIRMWARE_H
 
+#define ROM_READ_CHUNK (64 * 1024)
 
 // Load backup file content into SNES BSRAM. If no such file exists, this creates an empty one.
 // name: save file name (.srm)
