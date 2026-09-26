@@ -1,12 +1,12 @@
 /*
  * linker control script for 'bare metal' executables.
  * Ensures that _start defined in start.S is put at address 0
- * Uses the first 2MB of RAM.
+ * Uses the first 1.5MB of RAM.
  */
 MEMORY
 {
     FLASH (RX): ORIGIN = 0x00000, LENGTH = 100K
-    RAM  (RWX): ORIGIN = 100K, LENGTH = 0x1e7000
+    RAM  (RWX): ORIGIN = 100K, LENGTH = 0x167000
 }
 SECTIONS
 {
