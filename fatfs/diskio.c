@@ -78,6 +78,8 @@ DRESULT disk_read (
 	case DEV_SD :
 		if (!sd_initialized)
 			return RES_NOTRDY;
+		if (!buff || !count)
+			return RES_PARERR;
 		if (sd_readsector_multi(sector, buff, count))
 			return RES_OK;		// return 1 for success
 		else
@@ -105,6 +107,8 @@ DRESULT disk_write (
 	case DEV_SD :
 		if (!sd_initialized)
 			return RES_NOTRDY;
+		if (!buff || !count)
+			return RES_PARERR;
 		if (sd_writesector(sector, buff, count))
 			return RES_OK;		// return 1 for success
 		else
@@ -135,11 +139,8 @@ DRESULT disk_ioctl (
 
     switch (cmd) {
     case CTRL_SYNC:
-        /*
-         * If sd_writesector() only returns after the card
-         * has completed the write, nothing extra is needed here.
-         */
-        return RES_OK;
+        /* Propagate card programming/status failures to f_sync/f_close. */
+        return sd_sync() ? RES_OK : RES_ERROR;
 
     case GET_SECTOR_SIZE:
         *(WORD *)buff = 512;

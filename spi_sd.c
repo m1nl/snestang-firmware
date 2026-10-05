@@ -38,7 +38,7 @@ uint8_t spi_sendrecv(uint8_t x) {
 
 void spi_readblock(uint8_t *ptr, int length) {
     int i = 0;
-    if ((((uint32_t)ptr) & 3) == 0) {   // aligned on word boundaries
+    if ((((uintptr_t)ptr) & 3) == 0) {   // aligned on word boundaries
         // transfer in 4-byte words. this is about twice as fast
         for (; i+4<=length; i+=4) {
             *(uint32_t *)ptr = spi_receive_word();
@@ -52,7 +52,7 @@ void spi_readblock(uint8_t *ptr, int length) {
 
 void spi_writeblock(const uint8_t *ptr, int length) {
     int i = 0;
-    if ((((uint32_t)ptr) & 3) == 0) {   // aligned on word boundaries
+    if ((((uintptr_t)ptr) & 3) == 0) {   // aligned on word boundaries
         for (; i+4<=length; i+=4) {
             spi_send_word(*(uint32_t *)ptr);
             ptr += 4;
@@ -70,6 +70,8 @@ void spi_writeblock(const uint8_t *ptr, int length) {
 #define CMD17_READ_SINGLE_BLOCK         17
 #define CMD18_READ_MULTIPLE_BLOCK       18
 #define CMD24_WRITE_SINGLE_BLOCK        24
+#define CMD13_SEND_STATUS               13
+#define CMD16_SET_BLOCKLEN              16
 #define CMD32_ERASE_WR_BLK_START        32
 #define CMD33_ERASE_WR_BLK_END          33
 #define CMD38_ERASE                     38
@@ -136,6 +138,7 @@ uint8_t sd_send_command(uint8_t cmd, uint32_t arg) {
     if(cmd == CMD58_READ_OCR && response == 0x00) {
         // Check for SDHC card
         status = spi_receive();
+        if (!(status & 0x80)) response = 0xff; // OCR power-up must be complete
         if(status & OCR_SHDC_FLAG) {
                 sdhc_card = 1;
         } else {
@@ -147,10 +150,11 @@ uint8_t sd_send_command(uint8_t cmd, uint32_t arg) {
         spi_receive();
     } else if (cmd == CMD8_SEND_IF_COND && response == CMD_OK) {
         // CMD8 has a R7 response with 32-bit return value
-        spi_receive();
-        spi_receive();
-        spi_receive();
-        spi_receive();
+        uint32_t echo = (uint32_t)spi_receive() << 24;
+        echo |= (uint32_t)spi_receive() << 16;
+        echo |= (uint32_t)spi_receive() << 8;
+        echo |= spi_receive();
+        if (echo != CMD8_3V3_MODE_ARG) response = 0xff;
     }
 
     // Additional 8 clock cycles over SPI
@@ -165,6 +169,7 @@ int sd_init() {
     int retries;
     uint8_t response = 0xFF;
     uint8_t sd_version;
+    sdhc_card = 0; // never retain addressing mode from a previous card
 
     // 74 or more clock pulses to SCLK
     for (int i = 0; i < 10; i++)
@@ -192,26 +197,34 @@ int sd_init() {
     do {
         // Request 3.3V (with check pattern)
         response = sd_send_command(CMD8_SEND_IF_COND, CMD8_3V3_MODE_ARG);
-        if(retries++ > 8) {
-            // No response then assume card is V1.x spec compatible
+        if (response == 0x05) { // idle + illegal command: SD v1
             sd_version = 1;
             break;
+        }
+        if(retries++ > 8) {
+            DEBUG("SD init failure: CMD8\n");
+            return -3;
         }
     } while(response != CMD_OK);
 
     retries = 0;
 
+    uint32_t init_started = (uint32_t)time_millis();
     do {
         // Send CMD55 (APP_CMD) to allow ACMD to be sent
         response = sd_send_command(CMD55_APP_CMD,0);
+        if (response != 0x00 && response != CMD_OK) return -4;
         // delay(100);
         // Inform attached card that SDHC support is enabled
-        response = sd_send_command(ACMD41_SD_SEND_OP_COND, ACMD41_HOST_SUPPORTS_SDHC);
-        if(retries++ > 128) {
+        response = sd_send_command(ACMD41_SD_SEND_OP_COND,
+                                  sd_version == 2 ? ACMD41_HOST_SUPPORTS_SDHC : 0);
+        retries++;
+        if((uint32_t)((uint32_t)time_millis() - init_started) >= 1000) {
 	        // CS_H(1);
             DEBUG("SD init failure: ACMD41, %d\n", response);
 	        return -2;
         }
+        if (response != 0x00) delay(1);
         // if (retries & 0x15 == 0)       // retry as long as 400ms
         //     delay(50);
     } while(response != 0x00);
@@ -224,13 +237,15 @@ int sd_init() {
         do {
 	        response = sd_send_command(CMD58_READ_OCR, 0);
 	        if(retries++ > 8)
-	            break;
+	            return -5;
         } while(response != 0x00);
     } else {
        // Standard density only
        sdhc_card = 0;
     }
 
+    if (!sdhc_card && sd_send_command(CMD16_SET_BLOCKLEN, 512) != 0x00)
+        return -6;
     DEBUG("SD init complete. sdhc_card=%d, sd_version=%d\n", sdhc_card, sd_version);
     return 0;
 }
@@ -405,64 +420,47 @@ int sd_readsector_multi(uint32_t start_block, uint8_t *buffer,
     return result;
 }
 
+// A byte count is not a reliable programming timeout at different SPI speeds.
+// The card is ready only when it releases MISO to 0xFF.
+static int sd_wait_ready(uint32_t timeout_ms) {
+    uint32_t started = (uint32_t)time_millis();
+    do {
+        if (spi_receive() == 0xff) return 1;
+    } while ((uint32_t)((uint32_t)time_millis() - started) < timeout_ms);
+    return 0;
+}
+
+int sd_sync(void) {
+    if (!sd_wait_ready(1000)) return 0;
+    // CMD13 has an R2 response. The generic command helper discards the
+    // second status byte in its trailing clocks, so use the raw helper.
+    uint8_t r1 = sd_send_multiblock_command(CMD13_SEND_STATUS, 0, 0);
+    uint8_t r2 = spi_receive();
+    spi_send(0xff);
+    return r1 == 0 && r2 == 0;
+}
+
 int sd_writesector(uint32_t start_block, const uint8_t *buffer, uint32_t sector_count) {
-    uint8_t response;
-    int retries;
-
-    DEBUG("sd_writesector: %d %d\n", start_block, sector_count);
+    if (!buffer || sector_count == 0 || sector_count - 1 > UINT32_MAX - start_block)
+        return 0;
+    if (!sdhc_card && start_block + sector_count - 1 > UINT32_MAX / 512)
+        return 0;
     while (sector_count--) {
-        // Request block write
-        response = sd_send_command(CMD24_WRITE_SINGLE_BLOCK, start_block++);
-        if(response != 0x00) {
-            DEBUG("sd_writesector: Bad response %x\n", response);
-            return 0;
-        }
-
-        // Indicate start of data transfer
+        if (!sd_wait_ready(1000)) return 0;
+        uint8_t response = sd_send_command(CMD24_WRITE_SINGLE_BLOCK, start_block++);
+        if (response != 0x00) return 0;
         spi_send(CMD_START_OF_BLOCK);
-
-        // Send data block
         spi_writeblock(buffer, 512);
         buffer += 512;
-
-        // Send CRC (ignored)
-        spi_send(0xff);
-        spi_send(0xff);
-
-        // Get response
-        response = spi_receive();
-
-        if((response & 0x1f) != CMD_DATA_ACCEPTED) {
-            DEBUG("sd_writesector: Data rejected %x\n", response);
-            return 0;
-        }
-
-        retries = 0;
-
-        // Wait for data write complete
-        while(spi_sendrecv(0xFF) == 0) {
-            // Timeout
-	        if(retries > 5000) {
-                DEBUG("sd_writesector: Timeout\n");
-                return 0;
-            }
-	        ++retries;
-        }
-
-        // Additional 8 SPI clocks
-        spi_send(0xff);
-
-	    retries = 0;
-
-        // Wait for data write complete
-        while(spi_sendrecv(0xFF) == 0) {
-            // Timeout
-            if(retries > 5000) {
-                DEBUG("sd_writesector: Timeout\n");
-                return 0;
-            }
-            ++retries;
-        }
+        spi_send(0xff); spi_send(0xff); // CRC disabled in SPI mode
+        // Some cards delay the data response token. Do not accept a rejected
+        // block or report success while programming is still in progress.
+        int polls = 0;
+        do { response = spi_receive(); } while (response == 0xff && ++polls < 64);
+        int accepted = (response & 0x1f) == CMD_DATA_ACCEPTED;
+        if (!sd_wait_ready(1000) || !accepted) return 0;
+        // Busy release alone does not report programming/write-protect errors.
+        if (!sd_sync()) return 0;
     }
     return 1;
 }

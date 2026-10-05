@@ -11,6 +11,8 @@ CC = $(RISCV)-gcc
 OBJCOPY = $(RISCV)-objcopy
 OBJDUMP = $(RISCV)-objdump
 CFLAGS  = -Wall -Os -mabi=ilp32 -march=rv32i -ffreestanding
+BACKUP_MAX_SIZE ?= 131072
+CFLAGS += -DBACKUP_MAX_SIZE=$(BACKUP_MAX_SIZE)
 LFLAGS  = -mabi=ilp32 -march=rv32i -Wl,--build-id=none,-Bstatic,-T,baremetal.ld,--strip-debug -nostdlib
 LIBS    = -lgcc
 
@@ -28,6 +30,9 @@ endif
 
 default: $(TARGET_BIN)
 all: default
+
+test:
+	python3 tests/run_tests.py
 
 %.o: %.c $(HDRS)
 ifneq ($(VERBOSE),1)
@@ -58,4 +63,4 @@ endif
 clean:
 	$(Q)rm -f $(OBJS) $(TARGET_ELF) $(TARGET_BIN)
 
-.PHONY: default all clean
+.PHONY: default all clean test

@@ -22,7 +22,7 @@ uint32_t CORE_ID;
 #define OPTION_OSD_KEY_SELECT_RIGHT 2
 
 // SNES BSRAM is mapped at address 7MB 
-volatile uint8_t *SNES_BSRAM = (volatile uint8_t *)0x07000000;
+volatile uint8_t *SNES_BSRAM = (volatile uint8_t *)0x700000;
 
 int option_osd_key = OPTION_OSD_KEY_SELECT_RIGHT;
 #define OSD_KEY_CODE (option_osd_key == OPTION_OSD_KEY_SELECT_START ? 0xC : 0x84)
@@ -34,7 +34,20 @@ int core_backup_size;
 bool core_backup_valid;		// whether it is okay to save
 char core_backup_name[256];
 uint16_t snes_bsram_crc16;
+bool core_backup_gsu;
+// Covers the supported cartridges, including 128 KiB GBA flash. Larger saves
+// require a larger buffer and enough RV RAM (Nano has only 1 MiB for RV).
+#ifndef BACKUP_MAX_SIZE
+#define BACKUP_MAX_SIZE (128 * 1024)
+#endif
+static uint8_t backup_buffer[BACKUP_MAX_SIZE];
+static bool backup_retry;
+#define BACKUP_PATH_SIZE 272
+#define GSU_SAVE_OFFSET 0x7c00
+#define GSU_SAVE_SIZE   0x400
 uint32_t core_backup_time;
+static uint32_t backup_success_time;
+static bool backup_has_saved;
 
 const int GBA_BACKUP_NONE = 0;
 const int GBA_BACKUP_FLASH512K = 1;
@@ -738,11 +751,6 @@ int loadsnes(int rom) {
         status("Only .smc or .sfc supported");
         goto loadsnes_end;
     }
-    // core_backup_name = <base>.srm
-    int base_len = p-file_names[rom];
-    strncpy(core_backup_name, file_names[rom], base_len);
-    strcpy(core_backup_name+base_len, ".srm");
-
     // initiaze sd again to be sure
     if (sd_init() != 0) return 99;
 
@@ -772,9 +780,15 @@ int loadsnes(int rom) {
         }
     }
 
+    // core_backup_name = <base>.srm
+    int base_len = p-file_names[rom];
+    strncpy(core_backup_name, file_names[rom], base_len);
+    strcpy(core_backup_name+base_len, ".srm");
+
     // load actual ROM
     core_ctrl(1);		// enable game loading, this resets SNES
     core_running = false;
+    core_backup_valid = false;
 
     // Send 64-byte header to snes
     for (int i = 0; i < 64; i += 4) {
@@ -802,14 +816,23 @@ int loadsnes(int rom) {
         printf(" ROM=%d RAM=%d", 1 << rom_size, ram_size ? (1 << ram_size) : 0);
     } while (br == ROM_READ_CHUNK);
 
+    if (r != FR_OK || total != (unsigned int)(size - off)) {
+        status("ROM read failure");
+        r = r == FR_OK ? FR_DISK_ERR : r;
+        goto loadsnes_snes_end;
+    }
+
     // load BSRAM backup
+    core_backup_gsu = map_ctrl == 0x20 &&
+        (rom_type_header == 0x13 || rom_type_header == 0x14 ||
+         rom_type_header == 0x15 || rom_type_header == 0x1a);
     core_backup_size = ram_size == 0 ? 0 : ((1 << ram_size) << 10);
     if (core_backup_size > 0) {
-        memset((uint8_t *)0x700000, 0, core_backup_size);		// clear BSRAM
         backup_load(core_backup_name, core_backup_size);
     }
 
-    status("Success");
+    status(option_backup_bsram && core_backup_size > 0 && !core_backup_valid ?
+           "Save restore failed" : "Success");
     core_running = true;
 
     overlay(0);		// turn off OSD
@@ -941,11 +964,6 @@ int loadgba(int rom) {
         status("Only .gba supported");
         goto loadgba_end;
     }
-    // core_backup_name = <base>.srm
-    int base_len = p-file_names[rom];
-    strncpy(core_backup_name, file_names[rom], base_len);
-    strcpy(core_backup_name+base_len, ".srm");
-
     // initiaze sd again to be sure
     if (sd_init() != 0) return 99;
 
@@ -957,9 +975,15 @@ int loadgba(int rom) {
     unsigned int off = 0, br, total = 0;
     unsigned int size = file_sizes[rom];
 
+    // core_backup_name = <base>.srm
+    int base_len = p-file_names[rom];
+    strncpy(core_backup_name, file_names[rom], base_len);
+    strcpy(core_backup_name+base_len, ".srm");
+
     // load actual ROM
     core_ctrl(1);		// enable game loading, this resets GBA
     core_running = false;
+    core_backup_valid = false;
 
     // Send rom content to gba
     if ((r = f_lseek(&f, off)) != FR_OK) {
@@ -1143,113 +1167,158 @@ loadmd_end:
     return r;
 }
 
+// Use bounded paths and keep names valid when adding recovery suffixes.
+static bool backup_path(char *path, const char *name) {
+    if (!name || !*name || strlen(name) > 251 || strchr(name, '/') || strchr(name, '\\'))
+        return false;
+    strcpy(path, "/saves/");
+    strcat(path, name);
+    return true;
+}
+
+static bool backup_size_valid(int size) {
+    return size > 0 && size <= BACKUP_MAX_SIZE;
+}
+
+static uint16_t backup_crc(const volatile uint8_t *data, int size) {
+    // Only this shared GSU region is guaranteed coherent with RV while running.
+    // Keep the full .srm layout, but ignore cached work RAM for change detection.
+    if (core_backup_gsu && size >= GSU_SAVE_OFFSET + GSU_SAVE_SIZE)
+        return gen_crc16(data + GSU_SAVE_OFFSET, GSU_SAVE_SIZE);
+    return gen_crc16(data, size);
+}
+
 void backup_load(char *name, int size) {
+    char path[BACKUP_PATH_SIZE], previous[BACKUP_PATH_SIZE];
+    FIL f;
+    FILINFO info;
+    FRESULT result;
+    bool loaded = false;
     core_backup_valid = false;
-    if (!option_backup_bsram || size == 0) return;
-    char path[266] = "/saves/";
-    FILINFO fno;
-    uint8_t *bsram = (uint8_t *)0x700000;			// directly read into BSRAM
-
-    if (f_stat(path, &fno) != FR_OK) {
-        if (f_mkdir(path) != FR_OK) {
-            status("Cannot create /saves");
-            uart_printf("Cannot create /saves\n");
-            goto backup_load_crc;
+    backup_retry = false;
+    backup_success_time = 0;
+    backup_has_saved = false;
+    if (!backup_size_valid(size) || !backup_path(path, name)) {
+        status("Unsupported save size/name");
+        return;
+    }
+    // Called while the core is held in loading/reset. Always initialize RAM,
+    // even when persistence is disabled or restoring the file fails.
+    uint8_t fill = CORE_ID == CORE_GBA ? 0xff : 0;
+    for (int i = 0; i < size; i++) SNES_BSRAM[i] = fill;
+    if (!option_backup_bsram) return;
+    memset(backup_buffer, fill, size);
+    result = f_stat("/saves", &info);
+    if (result == FR_NO_FILE || result == FR_NO_PATH)
+        result = f_mkdir("/saves");
+    if (result != FR_OK) goto load_error;
+    result = f_open(&f, path, FA_READ);
+    if (result == FR_NO_FILE) {
+        // Recover an interrupted replacement that moved the old save aside.
+        strcpy(previous, path); strcat(previous, ".bak");
+        result = f_open(&f, previous, FA_READ);
+    }
+    if (result == FR_NO_FILE) {
+        loaded = true; // a new save starts with initialized RAM
+    } else if (result == FR_OK) {
+        // Accept short files with an initialized tail; reject oversized files.
+        if (f_size(&f) > (unsigned int)size) {
+            f_close(&f);
+            goto load_error;
         }
+        unsigned int total = 0;
+        while (total < (unsigned int)size) {
+            unsigned int count = (unsigned int)size - total, br = 0;
+            if (count > 1024) count = 1024;
+            result = f_read(&f, backup_buffer + total, count, &br);
+            if (result != FR_OK) break;
+            total += br;
+            if (br < count) break; // successful EOF: remainder stays initialized
+        }
+        FRESULT close_result = f_close(&f);
+        if (result != FR_OK || close_result != FR_OK) goto load_error;
+        for (int i = 0; i < size; i++) SNES_BSRAM[i] = backup_buffer[i];
+        loaded = true;
     }
-    strcat(path, core_backup_name);
-    uart_printf("Loading save file from: %s\n", core_backup_name);
-    FIL f;
-    if (f_open(&f, path, FA_READ) != FR_OK) {
-        core_backup_valid = true;					// new save file, mark as valid
-        uart_printf("Cannot open save file, assuming new\n");
-        goto backup_load_crc;
-    }
-    uint8_t *p = bsram;	
-    unsigned int load = 0;
-    while (load < size) {
-        unsigned int br;
-        if (f_read(&f, p, 1024, &br) != FR_OK || br < 1024) 
-            break;
-        p += br;
-        load += br;
-    }
+    if (!loaded) goto load_error;
+    if (CORE_ID == CORE_SNES)
+        snes_bsram_crc16 = backup_crc(backup_buffer, size);
+    if (CORE_ID == CORE_GBA) reg_cartram_dirty = 0;
     core_backup_valid = true;
-    f_close(&f);
-    uart_printf("Save file loaded\n", load);
-
-backup_load_crc:
-    if (CORE_ID == CORE_SNES) {
-        snes_bsram_crc16 = gen_crc16(bsram, size);
-        uart_printf("CRC16: %x\n", snes_bsram_crc16);
-    }
-    if (CORE_ID == CORE_GBA)
-        reg_cartram_dirty = 0;
-
+    core_backup_time = (uint32_t)time_millis();
+    uart_printf("Save initialized: %s, size=%d\n", name, size);
     return;
+
+load_error:
+    status("Cannot restore save");
+    uart_printf("Save restore failed; autosave disabled: %s\n", name);
 }
 
-// return 0: successfully saved, 1: BSRAM unchanged, 2: file write failure
+// return 0: saved, 1: unchanged/disabled, 2: save failure (retry is allowed)
 int backup_save(char *name, int size) {
-    if (!option_backup_bsram || !core_backup_valid || size == 0) return 1;
-    char path[266] = "/saves/";
+    char path[BACKUP_PATH_SIZE], temporary[BACKUP_PATH_SIZE], previous[BACKUP_PATH_SIZE];
     FIL f;
-    uint8_t *bsram = (uint8_t *)0x700000;		// directly read from BSRAM
-    int r = 0;
-
-    uart_printf("backup_save: start\n");
-
-    // first check if BSRAM content is changed since last save
-    if (CORE_ID == CORE_SNES) {
-        // SNES uses CRC check
-        int newcrc = gen_crc16(bsram, size);
-        uart_printf("New CRC: %x, size=%d\n", newcrc, size);
-        if (newcrc == snes_bsram_crc16) {
-            r = 1;
-            goto save_end;
-        }
-        snes_bsram_crc16 = newcrc;
-    } else {
-        // GBA uses dirty flag
-        if (reg_cartram_dirty == 0) {
-            r = 1;
-            uart_printf("Save data not changed\n");
-            goto save_end;
-        }
-        uart_printf("Save data CHANGED\n");
+    FILINFO info;
+    uint16_t newcrc = 0;
+    bool moved_previous = false;
+    bool gba_dirty_cleared = false;
+    if (!option_backup_bsram || !core_backup_valid || size == 0) return 1;
+    if (!backup_size_valid(size) || !backup_path(path, name)) return 2;
+    if (CORE_ID == CORE_GBA) {
+        if (!reg_cartram_dirty && !backup_retry) return 1;
+        // New writes during the copy/file I/O must keep the dirty flag set.
+        // A software retry flag retains pending work if file I/O fails.
         reg_cartram_dirty = 0;
+        gba_dirty_cleared = true;
     }
-
-    strcat(path, core_backup_name);
-    if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
-        status("Cannot write save file");
-        uart_printf("Cannot write save file");
-        r = 2;
-        goto save_end;
+    // Use one captured image for both CRC and file data. Without a core pause,
+    // writes during this copy can still produce a snapshot spanning moments.
+    for (int i = 0; i < size; i++) backup_buffer[i] = SNES_BSRAM[i];
+    if (CORE_ID == CORE_SNES) {
+        newcrc = backup_crc(backup_buffer, size);
+        if (newcrc == snes_bsram_crc16) return 1;
     }
-    unsigned int bw;
-    // for (int off = 0; off < size; off += bw) {
-    // 	if (f_write(&f, bsram, 1024, &bw) != FR_OK) {
-    uart_printf("Writing save file to: %s, len=%d\n", core_backup_name, size);
-    if (f_write(&f, bsram, size, &bw) != FR_OK || bw != size) {
-        status("Write failure");
-        uart_printf("Write failure, bw=%d\n", bw);
-        r = 2;
-        goto bsram_save_close;
+    strcpy(temporary, path); strcat(temporary, ".tmp");
+    strcpy(previous, path); strcat(previous, ".bak");
+    if (f_open(&f, temporary, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) goto save_error;
+    unsigned int bw = 0;
+    FRESULT write_result = f_write(&f, backup_buffer, size, &bw);
+    FRESULT close_result = f_close(&f);
+    if (write_result != FR_OK || bw != (unsigned int)size || close_result != FR_OK)
+        goto save_error;
+
+    // FatFs rename does not replace existing files. Keep the old file as .bak
+    // until the fully written temporary has successfully taken the final name.
+    FRESULT result = f_stat(path, &info);
+    if (result == FR_OK) {
+        result = f_unlink(previous);
+        if (result != FR_OK && result != FR_NO_FILE) goto save_error;
+        if (f_rename(path, previous) != FR_OK) goto save_error;
+        moved_previous = true;
+    } else if (result != FR_NO_FILE) goto save_error;
+    if (f_rename(temporary, path) != FR_OK) {
+        if (moved_previous && f_rename(previous, path) != FR_OK)
+            uart_printf("Previous save retained at %s\n", previous);
+        goto save_error;
     }
-    // }
+    // Cleanup failure does not invalidate the successfully installed save.
+    result = f_unlink(previous);
+    if (result != FR_OK && result != FR_NO_FILE)
+        uart_printf("Cannot remove previous save: %s\n", previous);
+    if (CORE_ID == CORE_SNES) snes_bsram_crc16 = newcrc;
+    backup_retry = false;
+    uart_printf("Save written: %s, size=%d\n", name, size);
+    return 0;
 
-bsram_save_close:
-    f_close(&f);
-
-save_end:
-    uart_printf("backup_save: end\n");
-    return r;
+save_error:
+    if (gba_dirty_cleared) backup_retry = true;
+    status("Cannot write save");
+    uart_printf("Save failed; retry enabled: %s\n", name);
+    return 2;
 }
 
-int backup_success_time;
 void backup_process() {
-    if (!core_running)
+    if (!core_running || !option_backup_bsram || !core_backup_valid)
         return;
     int size = 0;
     if (CORE_ID == CORE_GBA) {
@@ -1268,19 +1337,22 @@ void backup_process() {
         size = core_backup_size;
     } else
         return;
-    int t = time_millis();
-    if (t - core_backup_time >= 10000) {                    // need to save
-        // uart_printf("CHECK 4F4=%x\n", *(volatile uint32_t *)0x4f4);
+    uint32_t t = (uint32_t)time_millis();
+    if ((uint32_t)(t - core_backup_time) >= 10000) {                    // need to save
         uart_printf("Check backup: type=%d, size=%d\n", gba_backup_type, size);
         int r = backup_save(core_backup_name, size);
-        // uart_printf("CHECK 4F4=%x\n", *(volatile uint32_t *)0x4f4);
-        if (r == 0)
+        t = (uint32_t)time_millis();
+        if (r == 0) {
             backup_success_time = t;
-        if (backup_success_time != 0) {
+            backup_has_saved = true;
+            status("Saved to SD card");
+        } else if (r == 1 && backup_has_saved) {
             status("");
-            printf("Backup saved to sdcard %ds ago ", (t-backup_success_time)/1000);
-            print_hex_digits(snes_bsram_crc16, 4);
+            printf("Last SD save: %ds ago", (uint32_t)(t-backup_success_time)/1000);
+        } else if (r == 1) {
+            status("No save changes yet");
         }
+        // On failure, preserve backup_save's error message until the next retry.
         core_backup_time = t;
     }
 }

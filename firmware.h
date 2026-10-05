@@ -3,14 +3,14 @@
 
 #define ROM_READ_CHUNK (64 * 1024)
 
-// Load backup file content into SNES BSRAM. If no such file exists, this creates an empty one.
+// Load backup file content into SNES BSRAM. A missing file starts with zero-filled RAM.
 // name: save file name (.srm)
-// size: in number of KB
+// size: in bytes
 void backup_load(char *name, int size);
 
-// Save current BSRAM content on to SD card.
+// Save a captured BSRAM image to SD, preserving the previous file on failure.
 // name: save file name (.srm)
-// size: in number of KB
+// size: in bytes
 int backup_save(char *name, int size);
 
 // Saves every 10 seconds

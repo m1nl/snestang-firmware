@@ -65,6 +65,7 @@ extern int sd_init();   /* Return 0 on success, non-zero on failure */
 extern uint8_t sd_send_command(uint8_t cmd, uint32_t arg);
 extern int sd_readsector(uint32_t sector, uint8_t* buffer, uint32_t sector_count); /* 1:success, 0:failure*/
 extern int sd_readsector_multi(uint32_t sector, uint8_t* buffer, uint32_t sector_count); /* 1:success, 0:failure*/
+extern int sd_sync(void); /* 1: ready and error-free; use for FatFs CTRL_SYNC */
 extern int sd_writesector(uint32_t sector, const uint8_t* buffer, uint32_t sector_count); /* 1:success, 0:failure*/
 
 // communication with the core
@@ -113,6 +114,7 @@ static inline uint32_t cycle_counter() {
 // char *strstr(char *haystack, char *needle);
 // #endif
 
+int strcasecmp(const char *s1, const char *s2);
 char *strcasestr(char *haystack, char *needle);
 
 #endif
